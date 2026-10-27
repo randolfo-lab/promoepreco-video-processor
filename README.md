@@ -18,6 +18,10 @@ Responsabilidade: baixar vídeos oficiais selecionados pelo sistema principal, a
 - duração: vídeo inteiro
 - estilo: branco, borda/sombra escura e margem de segurança
 
+## Execução
+
+O workflow roda a cada 5 minutos e processa no máximo dois jobs por execução, além de aceitar execução manual e em pushes na `main`.
+
 ## Fluxo
 
 `Promo & Preço -> job de vídeo -> GitHub Actions + FFmpeg -> MP4 marcado -> publicação -> limpeza`
