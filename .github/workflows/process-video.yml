@@ -1,0 +1,107 @@
+name: Process watermarked videos
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: promoepreco-video-watermark
+  cancel-in-progress: false
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg and jq
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg jq
+
+      - name: Process up to two pending videos
+        shell: bash
+        env:
+          CLAIM_URL: https://promoepreco.shop/api/video-watermark/jobs/claim
+          OIDC_AUDIENCE: https://promoepreco.shop/video-watermark
+        run: |
+          set -euo pipefail
+
+          get_oidc() {
+            local encoded
+            encoded=$(python3 - <<'PY'
+import urllib.parse
+print(urllib.parse.quote('https://promoepreco.shop/video-watermark', safe=''))
+PY
+)
+            curl -fsSL \
+              -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${encoded}" | jq -r '.value'
+          }
+
+          for n in 1 2; do
+            OIDC_TOKEN=$(get_oidc)
+            HTTP_CODE=$(curl -sS -o job.json -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${OIDC_TOKEN}" \
+              -H 'Accept: application/json' \
+              "${CLAIM_URL}")
+
+            if [[ "${HTTP_CODE}" == "204" ]]; then
+              echo "No pending video watermark jobs."
+              exit 0
+            fi
+            if [[ "${HTTP_CODE}" != "200" ]]; then
+              echo "Claim failed with HTTP ${HTTP_CODE}" >&2
+              cat job.json >&2 || true
+              exit 1
+            fi
+
+            JOB_ID=$(jq -r '.id' job.json)
+            SOURCE_URL=$(jq -r '.sourceUrl' job.json)
+            REFERER=$(jq -r '.referer // empty' job.json)
+            UPLOAD_URL=$(jq -r '.uploadUrl' job.json)
+            MAX_BYTES=$(jq -r '.maxUploadBytes' job.json)
+
+            rm -f input.mp4 output.mp4
+            CURL_ARGS=(--fail --location --silent --show-error --max-filesize 94371840 \
+              -A 'Mozilla/5.0 (compatible; PromoEPrecoVideoProcessor/1.0)' \
+              -H 'Accept: video/*,*/*;q=0.8')
+            if [[ -n "${REFERER}" ]]; then
+              CURL_ARGS+=(-H "Referer: ${REFERER}")
+            fi
+            curl "${CURL_ARGS[@]}" "${SOURCE_URL}" -o input.mp4
+
+            INPUT_BYTES=$(stat -c%s input.mp4)
+            if (( INPUT_BYTES <= 0 || INPUT_BYTES > 94371840 )); then
+              echo "Invalid input size: ${INPUT_BYTES}" >&2
+              exit 1
+            fi
+
+            bash scripts/watermark.sh input.mp4 output.mp4
+            OUTPUT_BYTES=$(stat -c%s output.mp4)
+            if (( OUTPUT_BYTES <= 0 || OUTPUT_BYTES > MAX_BYTES )); then
+              echo "Invalid output size: ${OUTPUT_BYTES}" >&2
+              exit 1
+            fi
+
+            OIDC_TOKEN=$(get_oidc)
+            curl --fail --silent --show-error \
+              -X PUT \
+              -H "Authorization: Bearer ${OIDC_TOKEN}" \
+              -H 'Content-Type: video/mp4' \
+              -H "Content-Length: ${OUTPUT_BYTES}" \
+              --data-binary @output.mp4 \
+              "${UPLOAD_URL}" | tee upload-result.json
+
+            jq -e '.ok == true' upload-result.json >/dev/null
+            echo "Processed job ${JOB_ID}: ${OUTPUT_BYTES} bytes"
+            rm -f input.mp4 output.mp4 job.json upload-result.json
+          done
