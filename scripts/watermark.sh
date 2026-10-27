@@ -3,7 +3,9 @@ set -euo pipefail
 
 INPUT="${1:?input video required}"
 OUTPUT="${2:?output video required}"
-WATERMARK='https://promoepreco.shop/'
+# FFmpeg drawtext treats ':' as an option separator inside the filter graph.
+# Escape the URL at drawtext/filter level so the full watermark is rendered.
+WATERMARK='https\://promoepreco.shop/'
 FONT='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 
 if [[ ! -f "$INPUT" ]]; then
